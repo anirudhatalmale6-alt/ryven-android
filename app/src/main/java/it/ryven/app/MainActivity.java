@@ -335,25 +335,14 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void injectFeedbackSystem() {
-        // Lightweight: native toast bridge + hide install banner by specific text
+        // Lightweight: native toast bridge only
         String js = "(function() {" +
                 "if (window.__ryvenFeedbackInjected) return;" +
                 "window.__ryvenFeedbackInjected = true;" +
-                // Native toast bridge
                 "window.showRyvenToast = function(message) {" +
                 "  if (window.RyvenNative) { window.RyvenNative.showToast(message); }" +
                 "};" +
-                // Tell the web app we're in a native wrapper
                 "window.__RYVEN_NATIVE__ = true;" +
-                // Hide 'Install Ryven' banner specifically (not broad CSS selectors)
-                "var observer = new MutationObserver(function() {" +
-                "  document.querySelectorAll('div').forEach(function(el) {" +
-                "    if (el.textContent && el.textContent.includes('Installa Ryven sul tuo telefono') && el.offsetHeight > 0) {" +
-                "      el.style.display = 'none';" +
-                "    }" +
-                "  });" +
-                "});" +
-                "observer.observe(document.body, {childList: true, subtree: true});" +
                 "})();";
         webView.evaluateJavascript(js, null);
     }
