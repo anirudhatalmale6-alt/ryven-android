@@ -53,6 +53,7 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.browser.customtabs.CustomTabsIntent;
 import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
 import androidx.core.splashscreen.SplashScreen;
@@ -238,7 +239,9 @@ public class MainActivity extends AppCompatActivity {
                 }
 
                 // Intercept the main page HTML to inject polyfills before ANY scripts execute
-                if (request.isForMainFrame() && url.startsWith(APP_URL)) {
+                // Skip API URLs and auth URLs - only intercept SPA page loads
+                if (request.isForMainFrame() && url.startsWith(APP_URL)
+                        && !url.contains("/api/") && !url.contains("/auth/")) {
                     try {
                         return fetchAndInjectPolyfill(url, request);
                     } catch (Exception e) {
@@ -270,16 +273,27 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 String url = request.getUrl().toString();
+                Uri uri = request.getUrl();
+                String host = uri.getHost();
 
-                // Keep ALL http/https URLs inside the WebView by default
-                // Only open special schemes (tel:, mailto:, intent:, whatsapp:) externally
                 if (url.startsWith("http://") || url.startsWith("https://")) {
-                    // Only open truly external links in browser
+                    // Google OAuth - MUST open in Chrome Custom Tab
+                    // Google blocks sign-in from embedded WebViews
+                    if (host != null && (host.contains("accounts.google.com")
+                            || host.contains("accounts.google.co."))) {
+                        Log.d("RyvenWebView", "Opening Google OAuth in Custom Tab: " + url);
+                        openInCustomTab(uri);
+                        return true;
+                    }
+
+                    // WhatsApp - open externally
                     if (url.contains("wa.me") || url.contains("whatsapp.com")) {
                         openExternal(url);
                         return true;
                     }
-                    return false; // Load ALL web URLs in WebView
+
+                    // Everything else stays in WebView
+                    return false;
                 }
 
                 // Non-http schemes (tel:, mailto:, intent:, etc.)
@@ -411,6 +425,11 @@ public class MainActivity extends AppCompatActivity {
                     conn.setRequestProperty(entry.getKey(), entry.getValue());
                 }
             }
+        }
+        // Forward WebView cookies so authenticated page loads work
+        String cookies = CookieManager.getInstance().getCookie(url);
+        if (cookies != null && !cookies.isEmpty()) {
+            conn.setRequestProperty("Cookie", cookies);
         }
 
         int responseCode = conn.getResponseCode();
@@ -556,6 +575,34 @@ public class MainActivity extends AppCompatActivity {
             startActivity(intent);
         } catch (Exception e) {
             // Ignore
+        }
+    }
+
+    private void openInCustomTab(Uri uri) {
+        try {
+            CustomTabsIntent customTabsIntent = new CustomTabsIntent.Builder()
+                    .setShowTitle(true)
+                    .setShareState(CustomTabsIntent.SHARE_STATE_OFF)
+                    .build();
+            // FLAG_ACTIVITY_NO_HISTORY so Custom Tab doesn't linger in recents
+            customTabsIntent.intent.addFlags(Intent.FLAG_ACTIVITY_NO_HISTORY);
+            customTabsIntent.launchUrl(this, uri);
+        } catch (Exception e) {
+            // Fallback to external browser if Custom Tabs not available
+            openExternal(uri.toString());
+        }
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        // Handle deep link callback from OAuth (Chrome Custom Tab redirects back here)
+        Uri data = intent.getData();
+        if (data != null && "app.ryven.it".equals(data.getHost())) {
+            String url = data.toString();
+            Log.d("RyvenWebView", "Deep link received: " + url);
+            webView.loadUrl(url);
         }
     }
 
