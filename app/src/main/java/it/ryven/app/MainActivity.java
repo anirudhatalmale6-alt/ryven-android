@@ -34,11 +34,16 @@ import android.widget.Toast;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
 import androidx.core.splashscreen.SplashScreen;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
+
+import android.webkit.JsResult;
+import android.webkit.JsPromptResult;
+import android.widget.EditText;
 
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.snackbar.Snackbar;
@@ -229,8 +234,54 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        // Chrome client - handle file uploads, permissions, geolocation
+        // Allow popups/new windows
+        settings.setJavaScriptCanOpenWindowsAutomatically(true);
+        settings.setSupportMultipleWindows(false);
+
+        // Chrome client - handle file uploads, permissions, geolocation, JS dialogs
         webView.setWebChromeClient(new WebChromeClient() {
+
+            // Handle JavaScript alert() dialogs
+            @Override
+            public boolean onJsAlert(WebView view, String url, String message, JsResult result) {
+                new AlertDialog.Builder(MainActivity.this)
+                        .setTitle("Ryven")
+                        .setMessage(message)
+                        .setPositiveButton("OK", (dialog, which) -> result.confirm())
+                        .setCancelable(false)
+                        .show();
+                return true;
+            }
+
+            // Handle JavaScript confirm() dialogs
+            @Override
+            public boolean onJsConfirm(WebView view, String url, String message, JsResult result) {
+                new AlertDialog.Builder(MainActivity.this)
+                        .setTitle("Ryven")
+                        .setMessage(message)
+                        .setPositiveButton("OK", (dialog, which) -> result.confirm())
+                        .setNegativeButton("Annulla", (dialog, which) -> result.cancel())
+                        .setCancelable(false)
+                        .show();
+                return true;
+            }
+
+            // Handle JavaScript prompt() dialogs
+            @Override
+            public boolean onJsPrompt(WebView view, String url, String message, String defaultValue, JsPromptResult result) {
+                EditText input = new EditText(MainActivity.this);
+                input.setText(defaultValue);
+                new AlertDialog.Builder(MainActivity.this)
+                        .setTitle("Ryven")
+                        .setMessage(message)
+                        .setView(input)
+                        .setPositiveButton("OK", (dialog, which) -> result.confirm(input.getText().toString()))
+                        .setNegativeButton("Annulla", (dialog, which) -> result.cancel())
+                        .setCancelable(false)
+                        .show();
+                return true;
+            }
+
             @Override
             public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> callback,
                                              FileChooserParams fileChooserParams) {
@@ -269,39 +320,14 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void injectTouchFixes() {
+        // Minimal touch fixes - avoid overriding the app's own CSS
+        // Only add touch-action: manipulation to eliminate 300ms tap delay
         String js = "(function() {" +
-                // Remove 300ms tap delay
-                "var meta = document.querySelector('meta[name=viewport]');" +
-                "if (meta) {" +
-                "  if (!meta.content.includes('user-scalable')) {" +
-                "    meta.content += ', user-scalable=no';" +
-                "  }" +
-                "}" +
-                // Fix touch events on buttons and interactive elements
-                "document.addEventListener('touchstart', function(e) {" +
-                "  var target = e.target.closest('button, a, [role=button], [onclick], input[type=submit], [tabindex]');" +
-                "  if (target) {" +
-                "    target.style.opacity = '0.7';" +
-                "    setTimeout(function() { target.style.opacity = '1'; }, 150);" +
-                "  }" +
-                "}, {passive: true});" +
-                // Fix z-index issues with overlays/popups
+                "if (window.__ryvenTouchFixed) return;" +
+                "window.__ryvenTouchFixed = true;" +
                 "var style = document.createElement('style');" +
                 "style.textContent = '" +
-                "  * { -webkit-tap-highlight-color: rgba(46,125,50,0.2); }" +
-                "  [role=dialog], [role=alertdialog], .modal, .popup, .overlay, .alert {" +
-                "    z-index: 99999 !important;" +
-                "    pointer-events: auto !important;" +
-                "  }" +
-                "  [role=dialog] button, [role=alertdialog] button, .modal button, .popup button {" +
-                "    pointer-events: auto !important;" +
-                "    position: relative;" +
-                "    z-index: 100000 !important;" +
-                "  }" +
-                "  button, a, [role=button], input[type=submit] {" +
-                "    touch-action: manipulation;" +
-                "    cursor: pointer;" +
-                "  }" +
+                "  html { touch-action: manipulation; }" +
                 "';" +
                 "document.head.appendChild(style);" +
                 "})();";
@@ -309,34 +335,25 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void injectFeedbackSystem() {
-        // Only inject a lightweight toast utility - do NOT intercept fetch/XHR
-        // The app's own feedback system should work natively
+        // Lightweight: native toast bridge + hide install banner by specific text
         String js = "(function() {" +
                 "if (window.__ryvenFeedbackInjected) return;" +
                 "window.__ryvenFeedbackInjected = true;" +
-                // Provide native toast bridge for the web app to call if needed
-                "window.showRyvenToast = function(message, type) {" +
+                // Native toast bridge
+                "window.showRyvenToast = function(message) {" +
                 "  if (window.RyvenNative) { window.RyvenNative.showToast(message); }" +
                 "};" +
-                // Hide the Base44 'Install app' banner since we're already in the app
-                "var style = document.createElement('style');" +
-                "style.textContent = '" +
-                "  [class*=install], [class*=Install], [data-testid*=install] {" +
-                "    display: none !important;" +
-                "  }" +
-                "';" +
-                "document.head.appendChild(style);" +
-                // Try to hide install prompt after DOM loads
-                "setTimeout(function() {" +
-                "  document.querySelectorAll('button, div, a').forEach(function(el) {" +
-                "    if (el.textContent && el.textContent.includes('Installa') && el.closest && el.closest('[class]')) {" +
-                "      var banner = el.closest('[class]');" +
-                "      if (banner && banner.textContent.includes('Installa Ryven')) {" +
-                "        banner.style.display = 'none';" +
-                "      }" +
+                // Tell the web app we're in a native wrapper
+                "window.__RYVEN_NATIVE__ = true;" +
+                // Hide 'Install Ryven' banner specifically (not broad CSS selectors)
+                "var observer = new MutationObserver(function() {" +
+                "  document.querySelectorAll('div').forEach(function(el) {" +
+                "    if (el.textContent && el.textContent.includes('Installa Ryven sul tuo telefono') && el.offsetHeight > 0) {" +
+                "      el.style.display = 'none';" +
                 "    }" +
                 "  });" +
-                "}, 2000);" +
+                "});" +
+                "observer.observe(document.body, {childList: true, subtree: true});" +
                 "})();";
         webView.evaluateJavascript(js, null);
     }
