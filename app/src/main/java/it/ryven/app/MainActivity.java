@@ -12,6 +12,8 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.MediaStore;
 import android.view.KeyEvent;
 import android.view.View;
@@ -27,9 +29,20 @@ import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebView;
 import android.webkit.ConsoleMessage;
 import android.webkit.WebViewClient;
+
+import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.Map;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
@@ -63,6 +76,23 @@ public class MainActivity extends AppCompatActivity {
     private ValueCallback<Uri[]> fileUploadCallback;
     private String cameraPhotoPath;
     private boolean isPageLoaded = false;
+    private String cachedUserAgent = null;
+
+    // Polyfill script injected into <head> BEFORE any other scripts.
+    // This ensures OneSignal finds a Notification API and doesn't crash.
+    private static final String EARLY_POLYFILL_SCRIPT =
+            "<script>" +
+            // Notification API polyfill - must run before OneSignal
+            "if(!window.Notification){" +
+            "window.Notification=function(t,o){};Notification.permission='denied';" +
+            "Notification.requestPermission=function(c){var p=Promise.resolve('denied');if(c)c('denied');return p};" +
+            "Notification.maxActions=0;" +
+            "}" +
+            // Ensure PushManager.subscribe doesn't crash
+            "if(window.navigator&&!navigator.permissions){" +
+            "navigator.permissions={query:function(d){return Promise.resolve({state:'denied',onchange:null})}};" +
+            "}" +
+            "</script>";
 
     private final ActivityResultLauncher<Intent> fileChooserLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
@@ -149,6 +179,7 @@ public class MainActivity extends AppCompatActivity {
 
         // Keep default WebView user agent - don't modify it
         // Base44 may need to detect WebView for proper functionality
+        cachedUserAgent = settings.getUserAgentString();
 
         // Cookies
         CookieManager cookieManager = CookieManager.getInstance();
@@ -170,7 +201,24 @@ public class MainActivity extends AppCompatActivity {
                 if (!isPageLoaded) {
                     progressBar.setVisibility(View.VISIBLE);
                 }
+                // Also inject polyfill here as a safety net (in case shouldInterceptRequest didn't run)
                 injectNotificationPolyfill(view);
+            }
+
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                String url = request.getUrl().toString();
+
+                // Intercept the main page HTML to inject polyfills before ANY scripts execute
+                if (request.isForMainFrame() && url.startsWith(APP_URL)) {
+                    try {
+                        return fetchAndInjectPolyfill(url, request);
+                    } catch (Exception e) {
+                        Log.e("RyvenWebView", "Intercept failed: " + e.getMessage());
+                    }
+                }
+
+                return super.shouldInterceptRequest(view, request);
             }
 
             @Override
@@ -310,6 +358,70 @@ public class MainActivity extends AppCompatActivity {
                 "window.Notification.maxActions = 0;" +
                 "})();";
         view.evaluateJavascript(js, null);
+    }
+
+    private WebResourceResponse fetchAndInjectPolyfill(String url, WebResourceRequest request) throws Exception {
+        URL pageUrl = new URL(url);
+        HttpURLConnection conn = (HttpURLConnection) pageUrl.openConnection();
+        conn.setInstanceFollowRedirects(true);
+        conn.setConnectTimeout(10000);
+        conn.setReadTimeout(15000);
+
+        // Forward original request headers
+        if (cachedUserAgent != null) {
+            conn.setRequestProperty("User-Agent", cachedUserAgent);
+        }
+        Map<String, String> headers = request.getRequestHeaders();
+        if (headers != null) {
+            for (Map.Entry<String, String> entry : headers.entrySet()) {
+                if (!entry.getKey().equalsIgnoreCase("User-Agent") || cachedUserAgent == null) {
+                    conn.setRequestProperty(entry.getKey(), entry.getValue());
+                }
+            }
+        }
+
+        int responseCode = conn.getResponseCode();
+        if (responseCode != 200) {
+            conn.disconnect();
+            return null; // Let WebView handle non-200 responses normally
+        }
+
+        // Read HTML
+        InputStream is = conn.getInputStream();
+        BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8));
+        StringBuilder sb = new StringBuilder();
+        String line;
+        while ((line = reader.readLine()) != null) {
+            sb.append(line).append('\n');
+        }
+        reader.close();
+        conn.disconnect();
+
+        String html = sb.toString();
+
+        // Inject polyfill script right after <head> (before any other scripts)
+        int headIdx = html.indexOf("<head>");
+        if (headIdx >= 0) {
+            html = html.substring(0, headIdx + 6) + EARLY_POLYFILL_SCRIPT + html.substring(headIdx + 6);
+        } else {
+            // No <head> tag found, try injecting at the start of <html>
+            int htmlIdx = html.indexOf("<html");
+            if (htmlIdx >= 0) {
+                int closeTag = html.indexOf(">", htmlIdx);
+                if (closeTag >= 0) {
+                    html = html.substring(0, closeTag + 1) + "<head>" + EARLY_POLYFILL_SCRIPT + "</head>" + html.substring(closeTag + 1);
+                }
+            }
+        }
+
+        byte[] data = html.getBytes(StandardCharsets.UTF_8);
+        ByteArrayInputStream bis = new ByteArrayInputStream(data);
+
+        Map<String, String> responseHeaders = new HashMap<>();
+        responseHeaders.put("Access-Control-Allow-Origin", "*");
+        responseHeaders.put("Cache-Control", "no-cache");
+
+        return new WebResourceResponse("text/html", "UTF-8", 200, "OK", responseHeaders, bis);
     }
 
     private void injectErrorLogger() {
