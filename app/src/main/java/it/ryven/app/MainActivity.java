@@ -420,6 +420,22 @@ public class MainActivity extends AppCompatActivity {
                 "  ' notif=' + ('Notification' in window) + " +
                 "  ' notifPerm=' + (window.Notification ? Notification.permission : 'N/A') + " +
                 "  ' idb=' + (typeof indexedDB !== 'undefined'));" +
+                // Dump localStorage keys (especially auth tokens)
+                "var lsKeys = [];" +
+                "for (var i = 0; i < localStorage.length; i++) {" +
+                "  var k = localStorage.key(i);" +
+                "  var v = localStorage.getItem(k);" +
+                "  if (k.includes('token') || k.includes('auth') || k.includes('user') || k.includes('session')) {" +
+                "    lsKeys.push(k + '=' + (v ? v.substring(0, 40) + '...' : 'null'));" +
+                "  } else {" +
+                "    lsKeys.push(k);" +
+                "  }" +
+                "}" +
+                "addLog('LS', lsKeys.join(', '));" +
+                // Dump cookies
+                "addLog('COOKIES', document.cookie || '(none)');" +
+                // Log current URL (to see if auth params are in URL)
+                "addLog('URL', window.location.href);" +
                 // Triple-tap top-left corner to toggle panel
                 "var tapCount = 0, tapTimer;" +
                 "document.addEventListener('click', function(e) {" +
