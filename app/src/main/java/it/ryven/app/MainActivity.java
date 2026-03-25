@@ -79,19 +79,37 @@ public class MainActivity extends AppCompatActivity {
     private String cachedUserAgent = null;
 
     // Polyfill script injected into <head> BEFORE any other scripts.
-    // This ensures OneSignal finds a Notification API and doesn't crash.
+    // Stubs OneSignal completely to prevent SDK from loading and crashing.
+    // The OneSignal SDK causes unhandled errors in WebView that corrupt
+    // React's synthetic event delegation, breaking all button clicks.
     private static final String EARLY_POLYFILL_SCRIPT =
             "<script>" +
-            // Notification API polyfill - must run before OneSignal
+            // Stub OneSignal BEFORE the app checks `if (window.OneSignal)`.
+            // The app's cie() function checks this and skips SDK loading if present.
+            "window.OneSignal={" +
+            "init:function(){return Promise.resolve();}," +
+            "Notifications:{" +
+            "requestPermission:function(){return Promise.resolve('denied');}," +
+            "permission:false," +
+            "addEventListener:function(){}" +
+            "}," +
+            "login:function(){}," +
+            "logout:function(){}," +
+            "setExternalUserId:function(){return Promise.resolve();}," +
+            "getExternalUserId:function(){return Promise.resolve(null);}," +
+            "User:{addTag:function(){},addTags:function(){},removeTag:function(){},removeTags:function(){}}" +
+            "};" +
+            // Notification API polyfill as backup
             "if(!window.Notification){" +
             "window.Notification=function(t,o){};Notification.permission='denied';" +
             "Notification.requestPermission=function(c){var p=Promise.resolve('denied');if(c)c('denied');return p};" +
             "Notification.maxActions=0;" +
             "}" +
-            // Ensure PushManager.subscribe doesn't crash
+            // Ensure navigator.permissions doesn't crash
             "if(window.navigator&&!navigator.permissions){" +
             "navigator.permissions={query:function(d){return Promise.resolve({state:'denied',onchange:null})}};" +
             "}" +
+            "console.log('[Ryven] WebView polyfills injected - OneSignal stubbed');" +
             "</script>";
 
     private final ActivityResultLauncher<Intent> fileChooserLauncher =
@@ -208,6 +226,16 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 String url = request.getUrl().toString();
+
+                // Block OneSignal SDK from loading entirely - it causes unhandled
+                // errors in WebView that corrupt React's event system
+                if (url.contains("cdn.onesignal.com") || url.contains("OneSignalSDK")) {
+                    Log.d("RyvenWebView", "Blocked OneSignal: " + url);
+                    // Return empty JS to prevent network error
+                    String emptyJs = "/* OneSignal blocked in WebView */";
+                    return new WebResourceResponse("application/javascript", "UTF-8",
+                            new ByteArrayInputStream(emptyJs.getBytes(StandardCharsets.UTF_8)));
+                }
 
                 // Intercept the main page HTML to inject polyfills before ANY scripts execute
                 if (request.isForMainFrame() && url.startsWith(APP_URL)) {
@@ -343,19 +371,24 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void injectNotificationPolyfill(WebView view) {
-        // Polyfill the Notification API before page scripts run.
-        // WebView lacks Notification support, which crashes OneSignal SDK.
-        // This stub prevents the crash by providing a no-op Notification constructor.
+        // Safety net: stub OneSignal + Notification API via evaluateJavascript
+        // (in case shouldInterceptRequest HTML injection didn't run)
         String js = "(function() {" +
-                "if (window.Notification) return;" +
-                "window.Notification = function(title, options) {};" +
-                "window.Notification.permission = 'denied';" +
-                "window.Notification.requestPermission = function(cb) {" +
-                "  var p = Promise.resolve('denied');" +
-                "  if (cb) cb('denied');" +
-                "  return p;" +
-                "};" +
-                "window.Notification.maxActions = 0;" +
+                "if (!window.OneSignal || !window.OneSignal.init) {" +
+                "  window.OneSignal = {" +
+                "    init: function(){return Promise.resolve();}," +
+                "    Notifications: {requestPermission:function(){return Promise.resolve('denied');},permission:false,addEventListener:function(){}}," +
+                "    login:function(){},logout:function(){}," +
+                "    setExternalUserId:function(){return Promise.resolve();}," +
+                "    getExternalUserId:function(){return Promise.resolve(null);}," +
+                "    User:{addTag:function(){},addTags:function(){},removeTag:function(){},removeTags:function(){}}" +
+                "  };" +
+                "}" +
+                "if (!window.Notification) {" +
+                "  window.Notification = function(t,o){};" +
+                "  Notification.permission = 'denied';" +
+                "  Notification.requestPermission = function(c){var p=Promise.resolve('denied');if(c)c('denied');return p;};" +
+                "}" +
                 "})();";
         view.evaluateJavascript(js, null);
     }
