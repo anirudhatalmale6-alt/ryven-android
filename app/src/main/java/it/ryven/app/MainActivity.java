@@ -28,11 +28,13 @@ import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+import android.webkit.ConsoleMessage;
 import android.webkit.WebViewClient;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.Toast;
+import android.util.Log;
 
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
@@ -145,16 +147,8 @@ public class MainActivity extends AppCompatActivity {
         settings.setJavaScriptCanOpenWindowsAutomatically(true);
         settings.setSupportMultipleWindows(false);
 
-        // User agent - CRITICAL: remove WebView markers so the web app
-        // thinks it's running in Chrome, not a WebView.
-        // Default WebView UA contains "; wv)" and "Version/4.0" which
-        // Base44/web apps detect and may restrict functionality.
-        String ua = settings.getUserAgentString();
-        // Remove "; wv)" marker
-        ua = ua.replace("; wv)", ")");
-        // Remove "Version/4.0 " which is WebView-specific
-        ua = ua.replace("Version/4.0 ", "");
-        settings.setUserAgentString(ua);
+        // Keep default WebView user agent - don't modify it
+        // Base44 may need to detect WebView for proper functionality
 
         // Cookies
         CookieManager cookieManager = CookieManager.getInstance();
@@ -184,6 +178,7 @@ public class MainActivity extends AppCompatActivity {
                 isPageLoaded = true;
                 progressBar.setVisibility(View.GONE);
                 hideError();
+                injectErrorLogger();
             }
 
             @Override
@@ -286,7 +281,71 @@ public class MainActivity extends AppCompatActivity {
             public void onPermissionRequest(PermissionRequest request) {
                 runOnUiThread(() -> request.grant(request.getResources()));
             }
+
+            @Override
+            public boolean onConsoleMessage(ConsoleMessage consoleMessage) {
+                String msg = consoleMessage.message();
+                String src = consoleMessage.sourceId();
+                int line = consoleMessage.lineNumber();
+                Log.d("RyvenWebView", consoleMessage.messageLevel() + ": " + msg + " [" + src + ":" + line + "]");
+                return super.onConsoleMessage(consoleMessage);
+            }
         });
+    }
+
+    private void injectErrorLogger() {
+        // Inject a small floating error log panel for debugging
+        // Client can screenshot this to show us exact JS errors
+        String js = "(function() {" +
+                "if (window.__ryvenDebug) return;" +
+                "window.__ryvenDebug = true;" +
+                // Create debug panel (hidden by default, shake to show)
+                "var panel = document.createElement('div');" +
+                "panel.id = 'ryven-debug';" +
+                "panel.style.cssText = 'position:fixed;top:0;left:0;right:0;max-height:40vh;overflow:auto;background:rgba(0,0,0,0.85);color:#0f0;font:11px monospace;padding:8px;z-index:999999;display:none;';" +
+                "document.body.appendChild(panel);" +
+                "var logs = [];" +
+                "function addLog(type, msg) {" +
+                "  logs.push('[' + type + '] ' + msg);" +
+                "  if (logs.length > 50) logs.shift();" +
+                "  panel.innerHTML = '<b>Debug Log (tap to close)</b><br>' + logs.join('<br>');" +
+                "}" +
+                // Capture errors
+                "window.addEventListener('error', function(e) {" +
+                "  addLog('ERR', e.message + ' at ' + (e.filename||'') + ':' + (e.lineno||''));" +
+                "});" +
+                "window.addEventListener('unhandledrejection', function(e) {" +
+                "  addLog('PROMISE', e.reason ? (e.reason.message || String(e.reason)) : 'unknown');" +
+                "});" +
+                // Capture console.error
+                "var origErr = console.error;" +
+                "console.error = function() {" +
+                "  addLog('console.error', Array.from(arguments).join(' '));" +
+                "  origErr.apply(console, arguments);" +
+                "};" +
+                // Log user agent for diagnostics
+                "addLog('UA', navigator.userAgent);" +
+                // Log WebView detection
+                "addLog('INFO', 'wv=' + (navigator.userAgent.includes('wv')) + " +
+                "  ' sw=' + ('serviceWorker' in navigator) + " +
+                "  ' notif=' + ('Notification' in window) + " +
+                "  ' idb=' + (typeof indexedDB !== 'undefined'));" +
+                // Triple-tap top-left corner to toggle panel
+                "var tapCount = 0, tapTimer;" +
+                "document.addEventListener('click', function(e) {" +
+                "  if (e.clientX < 60 && e.clientY < 60) {" +
+                "    tapCount++;" +
+                "    clearTimeout(tapTimer);" +
+                "    tapTimer = setTimeout(function() { tapCount = 0; }, 500);" +
+                "    if (tapCount >= 3) {" +
+                "      panel.style.display = panel.style.display === 'none' ? 'block' : 'none';" +
+                "      tapCount = 0;" +
+                "    }" +
+                "  }" +
+                "});" +
+                "panel.addEventListener('click', function() { panel.style.display = 'none'; });" +
+                "})();";
+        webView.evaluateJavascript(js, null);
     }
 
     private void openExternal(String url) {
