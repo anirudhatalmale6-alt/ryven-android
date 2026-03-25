@@ -19,6 +19,8 @@ import android.view.WindowManager;
 import android.webkit.CookieManager;
 import android.webkit.GeolocationPermissions;
 import android.webkit.JavascriptInterface;
+import android.webkit.JsPromptResult;
+import android.webkit.JsResult;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -27,26 +29,20 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
-import androidx.annotation.NonNull;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
 import androidx.core.splashscreen.SplashScreen;
-import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
-
-import android.webkit.JsResult;
-import android.webkit.JsPromptResult;
-import android.widget.EditText;
 
 import com.google.android.material.button.MaterialButton;
-import com.google.android.material.snackbar.Snackbar;
 
 import java.io.File;
 import java.io.IOException;
@@ -59,7 +55,6 @@ public class MainActivity extends AppCompatActivity {
     private static final String APP_URL = "https://app.ryven.it";
 
     private WebView webView;
-    private SwipeRefreshLayout swipeRefresh;
     private LinearLayout errorView;
     private ProgressBar progressBar;
 
@@ -87,7 +82,6 @@ public class MainActivity extends AppCompatActivity {
 
     private final ActivityResultLauncher<String[]> permissionLauncher =
             registerForActivityResult(new ActivityResultContracts.RequestMultiplePermissions(), permissions -> {
-                // Permissions handled - WebView will re-request if needed
             });
 
     @Override
@@ -96,27 +90,13 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        // Edge-to-edge status bar
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
         getWindow().setStatusBarColor(ContextCompat.getColor(this, android.R.color.transparent));
 
         webView = findViewById(R.id.webView);
-        swipeRefresh = findViewById(R.id.swipeRefresh);
         errorView = findViewById(R.id.errorView);
         progressBar = findViewById(R.id.progressBar);
         MaterialButton retryButton = findViewById(R.id.retryButton);
-
-        swipeRefresh.setColorSchemeColors(
-                ContextCompat.getColor(this, android.R.color.holo_green_dark)
-        );
-        swipeRefresh.setOnRefreshListener(() -> {
-            if (isNetworkAvailable()) {
-                webView.reload();
-            } else {
-                swipeRefresh.setRefreshing(false);
-                showError();
-            }
-        });
 
         retryButton.setOnClickListener(v -> {
             if (isNetworkAvailable()) {
@@ -135,54 +115,53 @@ public class MainActivity extends AppCompatActivity {
     private void setupWebView() {
         WebSettings settings = webView.getSettings();
 
-        // Core settings
+        // Core
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
         settings.setDatabaseEnabled(true);
-
-        // Cache - prefer network to ensure fresh data, fall back to cache offline
-        settings.setCacheMode(WebSettings.LOAD_DEFAULT);
-        settings.setAllowFileAccess(true);
-
-        // Ensure database/localStorage path is set
         settings.setDatabasePath(getApplicationContext().getDir("databases", MODE_PRIVATE).getPath());
 
-        // Viewport & rendering
+        // Cache
+        settings.setCacheMode(WebSettings.LOAD_DEFAULT);
+        settings.setAllowFileAccess(true);
+        settings.setAllowContentAccess(true);
+
+        // Viewport - let the web page control its own viewport
         settings.setUseWideViewPort(true);
         settings.setLoadWithOverviewMode(true);
         settings.setSupportZoom(false);
         settings.setBuiltInZoomControls(false);
 
-        // Media & content
+        // Media & images
         settings.setMediaPlaybackRequiresUserGesture(false);
-        settings.setAllowContentAccess(true);
         settings.setLoadsImagesAutomatically(true);
         settings.setBlockNetworkImage(false);
-
-        // Allow all HTTPS content (images from CDNs, APIs from different origins)
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
 
         // Geolocation
         settings.setGeolocationEnabled(true);
 
-        // User agent - use standard mobile Chrome UA to avoid detection/blocking
-        // Append RyvenApp identifier for the web app to detect native context
+        // Popups
+        settings.setJavaScriptCanOpenWindowsAutomatically(true);
+        settings.setSupportMultipleWindows(false);
+
+        // User agent - keep default Chrome UA, just append app marker
         String ua = settings.getUserAgentString();
         settings.setUserAgentString(ua + " RyvenApp/1.0");
 
-        // Enable cookies - critical for authentication with base44.app
+        // Cookies
         CookieManager cookieManager = CookieManager.getInstance();
         cookieManager.setAcceptCookie(true);
         cookieManager.setAcceptThirdPartyCookies(webView, true);
         cookieManager.flush();
 
-        // Enable WebView debugging in debug builds
+        // Debug
         WebView.setWebContentsDebuggingEnabled(true);
 
-        // JavaScript bridge for native feedback
+        // JS bridge
         webView.addJavascriptInterface(new WebAppInterface(), "RyvenNative");
 
-        // WebView client - handle navigation and errors
+        // WebView client
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
@@ -197,10 +176,7 @@ public class MainActivity extends AppCompatActivity {
                 super.onPageFinished(view, url);
                 isPageLoaded = true;
                 progressBar.setVisibility(View.GONE);
-                swipeRefresh.setRefreshing(false);
                 hideError();
-                injectTouchFixes();
-                injectFeedbackSystem();
             }
 
             @Override
@@ -215,33 +191,27 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 String url = request.getUrl().toString();
-                // Keep app domains in WebView
-                if (url.contains("ryven.it") || url.contains("ryven.app") ||
-                    url.contains("base44.com") || url.contains("base44.app") ||
-                    url.contains("onesignal.com") || url.contains("openstreetmap.org") ||
-                    url.contains("open-meteo.com") || url.contains("unpkg.com") ||
-                    url.contains("githubusercontent.com") || url.contains("leaflet")) {
-                    return false;
+
+                // Keep ALL http/https URLs inside the WebView by default
+                // Only open special schemes (tel:, mailto:, intent:, whatsapp:) externally
+                if (url.startsWith("http://") || url.startsWith("https://")) {
+                    // Only open truly external links in browser
+                    if (url.contains("wa.me") || url.contains("whatsapp.com")) {
+                        openExternal(url);
+                        return true;
+                    }
+                    return false; // Load ALL web URLs in WebView
                 }
-                // Open external links (WhatsApp, etc.) in browser
-                try {
-                    Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
-                    startActivity(intent);
-                } catch (Exception e) {
-                    // Ignore
-                }
+
+                // Non-http schemes (tel:, mailto:, intent:, etc.)
+                openExternal(url);
                 return true;
             }
         });
 
-        // Allow popups/new windows
-        settings.setJavaScriptCanOpenWindowsAutomatically(true);
-        settings.setSupportMultipleWindows(false);
-
-        // Chrome client - handle file uploads, permissions, geolocation, JS dialogs
+        // Chrome client - JS dialogs, file uploads, permissions
         webView.setWebChromeClient(new WebChromeClient() {
 
-            // Handle JavaScript alert() dialogs
             @Override
             public boolean onJsAlert(WebView view, String url, String message, JsResult result) {
                 new AlertDialog.Builder(MainActivity.this)
@@ -253,7 +223,6 @@ public class MainActivity extends AppCompatActivity {
                 return true;
             }
 
-            // Handle JavaScript confirm() dialogs
             @Override
             public boolean onJsConfirm(WebView view, String url, String message, JsResult result) {
                 new AlertDialog.Builder(MainActivity.this)
@@ -266,7 +235,6 @@ public class MainActivity extends AppCompatActivity {
                 return true;
             }
 
-            // Handle JavaScript prompt() dialogs
             @Override
             public boolean onJsPrompt(WebView view, String url, String message, String defaultValue, JsPromptResult result) {
                 EditText input = new EditText(MainActivity.this);
@@ -312,39 +280,15 @@ public class MainActivity extends AppCompatActivity {
                 runOnUiThread(() -> request.grant(request.getResources()));
             }
         });
-
-        // Scrolling behavior for swipe refresh
-        webView.setOnScrollChangeListener((v, scrollX, scrollY, oldScrollX, oldScrollY) -> {
-            swipeRefresh.setEnabled(scrollY == 0);
-        });
     }
 
-    private void injectTouchFixes() {
-        // Minimal touch fixes - avoid overriding the app's own CSS
-        // Only add touch-action: manipulation to eliminate 300ms tap delay
-        String js = "(function() {" +
-                "if (window.__ryvenTouchFixed) return;" +
-                "window.__ryvenTouchFixed = true;" +
-                "var style = document.createElement('style');" +
-                "style.textContent = '" +
-                "  html { touch-action: manipulation; }" +
-                "';" +
-                "document.head.appendChild(style);" +
-                "})();";
-        webView.evaluateJavascript(js, null);
-    }
-
-    private void injectFeedbackSystem() {
-        // Lightweight: native toast bridge only
-        String js = "(function() {" +
-                "if (window.__ryvenFeedbackInjected) return;" +
-                "window.__ryvenFeedbackInjected = true;" +
-                "window.showRyvenToast = function(message) {" +
-                "  if (window.RyvenNative) { window.RyvenNative.showToast(message); }" +
-                "};" +
-                "window.__RYVEN_NATIVE__ = true;" +
-                "})();";
-        webView.evaluateJavascript(js, null);
+    private void openExternal(String url) {
+        try {
+            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            startActivity(intent);
+        } catch (Exception e) {
+            // Ignore
+        }
     }
 
     private void openFileChooser(WebChromeClient.FileChooserParams params) {
@@ -355,7 +299,6 @@ public class MainActivity extends AppCompatActivity {
         if (acceptTypes != null && acceptTypes.length > 0 && acceptTypes[0] != null && !acceptTypes[0].isEmpty()) {
             intent.setType(acceptTypes[0]);
             if (acceptTypes[0].startsWith("image")) {
-                // Offer camera option for image uploads
                 Intent chooserIntent = createImageChooserIntent(intent);
                 fileChooserLauncher.launch(chooserIntent);
                 return;
@@ -457,28 +400,10 @@ public class MainActivity extends AppCompatActivity {
         super.onDestroy();
     }
 
-    // JavaScript bridge for native features
     public class WebAppInterface {
         @JavascriptInterface
         public void showToast(String message) {
             runOnUiThread(() -> Toast.makeText(MainActivity.this, message, Toast.LENGTH_SHORT).show());
-        }
-
-        @JavascriptInterface
-        public void showSnackbar(String message) {
-            runOnUiThread(() -> Snackbar.make(webView, message, Snackbar.LENGTH_SHORT).show());
-        }
-
-        @JavascriptInterface
-        public void vibrate() {
-            // Short vibration feedback
-            android.os.Vibrator v = (android.os.Vibrator) getSystemService(VIBRATOR_SERVICE);
-            if (v != null && v.hasVibrator()) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    v.vibrate(android.os.VibrationEffect.createOneShot(50,
-                            android.os.VibrationEffect.DEFAULT_AMPLITUDE));
-                }
-            }
         }
     }
 }
