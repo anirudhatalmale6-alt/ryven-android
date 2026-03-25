@@ -67,6 +67,8 @@ public class MainActivity extends AppCompatActivity {
     private ValueCallback<Uri[]> fileUploadCallback;
     private String cameraPhotoPath;
     private boolean isPageLoaded = false;
+    private String pendingAuthToken = null; // Token extracted from OAuth redirect
+    private final java.util.ArrayList<String> navLog = new java.util.ArrayList<>();
 
     private final ActivityResultLauncher<Intent> fileChooserLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
@@ -180,12 +182,28 @@ public class MainActivity extends AppCompatActivity {
                 if (!isPageLoaded) {
                     progressBar.setVisibility(View.VISIBLE);
                 }
+                // Log every navigation for debugging OAuth redirect chain
+                String shortUrl = url != null && url.length() > 80 ? url.substring(0, 80) + "..." : url;
+                Log.d("RyvenWebView", "PageStarted: " + shortUrl);
+                navLog.add("START:" + shortUrl);
+                if (navLog.size() > 20) navLog.remove(0);
+
                 // Inject OneSignal polyfill
                 injectNotificationPolyfill(view);
-                // If this is an OAuth callback with access_token, store it immediately
-                // before the React app loads (prevents race condition with 401 auto-logout)
+
+                // If this is an OAuth callback with access_token, save token for later injection
                 if (url != null && url.contains("access_token=")) {
-                    injectTokenFromUrl(view, url);
+                    try {
+                        Uri uri = Uri.parse(url);
+                        String token = uri.getQueryParameter("access_token");
+                        if (token != null && !token.isEmpty()) {
+                            pendingAuthToken = token;
+                            Log.d("RyvenWebView", "OAuth token captured from URL (length=" + token.length() + ")");
+                            navLog.add("TOKEN_FOUND:len=" + token.length());
+                        }
+                    } catch (Exception e) {
+                        Log.e("RyvenWebView", "Token extraction failed: " + e.getMessage());
+                    }
                 }
             }
 
@@ -211,6 +229,26 @@ public class MainActivity extends AppCompatActivity {
                 isPageLoaded = true;
                 progressBar.setVisibility(View.GONE);
                 hideError();
+
+                String shortUrl = url != null && url.length() > 80 ? url.substring(0, 80) + "..." : url;
+                navLog.add("FINISH:" + shortUrl);
+                if (navLog.size() > 20) navLog.remove(0);
+
+                // If we captured an auth token from the OAuth redirect, inject it now
+                // (onPageFinished is the right time - the new page's localStorage is available)
+                if (pendingAuthToken != null && url != null && url.contains("app.ryven.it")) {
+                    String token = pendingAuthToken;
+                    pendingAuthToken = null;
+                    Log.d("RyvenWebView", "Injecting saved auth token into localStorage");
+                    String js = "(function() {" +
+                            "localStorage.setItem('token', '" + token.replace("'", "\\'").replace("\\", "\\\\") + "');" +
+                            "localStorage.setItem('base44_access_token', '" + token.replace("'", "\\'").replace("\\", "\\\\") + "');" +
+                            "console.log('[Ryven] Auth token injected into localStorage, reloading...');" +
+                            "window.location.reload();" +
+                            "})();";
+                    view.evaluateJavascript(js, null);
+                }
+
                 injectErrorLogger();
             }
 
@@ -226,6 +264,25 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 String url = request.getUrl().toString();
+                String shortUrl = url.length() > 80 ? url.substring(0, 80) + "..." : url;
+                Log.d("RyvenWebView", "Navigation: " + shortUrl);
+                navLog.add("NAV:" + shortUrl);
+                if (navLog.size() > 20) navLog.remove(0);
+
+                // Capture token from redirect URL before it loads
+                if (url.contains("access_token=")) {
+                    try {
+                        Uri uri = Uri.parse(url);
+                        String token = uri.getQueryParameter("access_token");
+                        if (token != null && !token.isEmpty()) {
+                            pendingAuthToken = token;
+                            Log.d("RyvenWebView", "Token captured in shouldOverrideUrlLoading");
+                            navLog.add("TOKEN_CAPTURED:len=" + token.length());
+                        }
+                    } catch (Exception e) {
+                        Log.e("RyvenWebView", "Token capture failed: " + e.getMessage());
+                    }
+                }
 
                 if (url.startsWith("http://") || url.startsWith("https://")) {
                     // WhatsApp - open externally
@@ -234,8 +291,7 @@ public class MainActivity extends AppCompatActivity {
                         return true;
                     }
 
-                    // Everything else stays in WebView (including Google OAuth,
-                    // Facebook OAuth, and Base44 auth callbacks)
+                    // Everything else stays in WebView
                     return false;
                 }
 
@@ -350,27 +406,6 @@ public class MainActivity extends AppCompatActivity {
         view.evaluateJavascript(js, null);
     }
 
-    private void injectTokenFromUrl(WebView view, String url) {
-        // Extract access_token from OAuth callback URL and store in localStorage
-        // BEFORE the React app loads. This prevents race conditions where other
-        // API calls trigger 401 auto-logout before the token is fully processed.
-        try {
-            Uri uri = Uri.parse(url);
-            String token = uri.getQueryParameter("access_token");
-            if (token != null && !token.isEmpty()) {
-                Log.d("RyvenWebView", "OAuth token found in URL, injecting into localStorage");
-                String js = "(function() {" +
-                        "localStorage.setItem('token', '" + token.replace("'", "\\'") + "');" +
-                        "localStorage.setItem('base44_access_token', '" + token.replace("'", "\\'") + "');" +
-                        "console.log('[Ryven] Auth token pre-stored in localStorage');" +
-                        "})();";
-                view.evaluateJavascript(js, null);
-            }
-        } catch (Exception e) {
-            Log.e("RyvenWebView", "Token injection failed: " + e.getMessage());
-        }
-    }
-
     private void injectErrorLogger() {
         // Inject a small floating error log panel for debugging
         // Client can screenshot this to show us exact JS errors
@@ -462,6 +497,8 @@ public class MainActivity extends AppCompatActivity {
                 "addLog('COOKIES', document.cookie || '(none)');" +
                 // Log current URL (to see if auth params are in URL)
                 "addLog('URL', window.location.href);" +
+                // Inject navigation log from Java side
+                "addLog('NAV_HISTORY', '" + String.join(" | ", navLog).replace("'", "\\'") + "');" +
                 // Triple-tap top-left corner to toggle panel
                 "var tapCount = 0, tapTimer;" +
                 "document.addEventListener('click', function(e) {" +
