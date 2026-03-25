@@ -135,9 +135,12 @@ public class MainActivity extends AppCompatActivity {
         settings.setDomStorageEnabled(true);
         settings.setDatabaseEnabled(true);
 
-        // Cache for better performance
+        // Cache - prefer network to ensure fresh data, fall back to cache offline
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
         settings.setAllowFileAccess(true);
+
+        // Ensure database/localStorage path is set
+        settings.setDatabasePath(getApplicationContext().getDir("databases", MODE_PRIVATE).getPath());
 
         // Viewport & rendering
         settings.setUseWideViewPort(true);
@@ -145,24 +148,31 @@ public class MainActivity extends AppCompatActivity {
         settings.setSupportZoom(false);
         settings.setBuiltInZoomControls(false);
 
-        // Media
+        // Media & content
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setAllowContentAccess(true);
+        settings.setLoadsImagesAutomatically(true);
+        settings.setBlockNetworkImage(false);
 
-        // Mixed content (allow HTTPS images from different origins)
-        settings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+        // Allow all HTTPS content (images from CDNs, APIs from different origins)
+        settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
 
         // Geolocation
         settings.setGeolocationEnabled(true);
 
-        // User agent - append app identifier
+        // User agent - use standard mobile Chrome UA to avoid detection/blocking
+        // Append RyvenApp identifier for the web app to detect native context
         String ua = settings.getUserAgentString();
         settings.setUserAgentString(ua + " RyvenApp/1.0");
 
-        // Enable cookies
+        // Enable cookies - critical for authentication with base44.app
         CookieManager cookieManager = CookieManager.getInstance();
         cookieManager.setAcceptCookie(true);
         cookieManager.setAcceptThirdPartyCookies(webView, true);
+        cookieManager.flush();
+
+        // Enable WebView debugging in debug builds
+        WebView.setWebContentsDebuggingEnabled(true);
 
         // JavaScript bridge for native feedback
         webView.addJavascriptInterface(new WebAppInterface(), "RyvenNative");
@@ -200,11 +210,15 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 String url = request.getUrl().toString();
-                // Keep app.ryven.it and base44 URLs in WebView
-                if (url.contains("ryven.it") || url.contains("base44.com")) {
+                // Keep app domains in WebView
+                if (url.contains("ryven.it") || url.contains("ryven.app") ||
+                    url.contains("base44.com") || url.contains("base44.app") ||
+                    url.contains("onesignal.com") || url.contains("openstreetmap.org") ||
+                    url.contains("open-meteo.com") || url.contains("unpkg.com") ||
+                    url.contains("githubusercontent.com") || url.contains("leaflet")) {
                     return false;
                 }
-                // Open external links in browser
+                // Open external links (WhatsApp, etc.) in browser
                 try {
                     Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
                     startActivity(intent);
@@ -295,66 +309,34 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void injectFeedbackSystem() {
+        // Only inject a lightweight toast utility - do NOT intercept fetch/XHR
+        // The app's own feedback system should work natively
         String js = "(function() {" +
                 "if (window.__ryvenFeedbackInjected) return;" +
                 "window.__ryvenFeedbackInjected = true;" +
-                // Create toast/snackbar container
-                "var container = document.createElement('div');" +
-                "container.id = 'ryven-toast-container';" +
-                "container.style.cssText = 'position:fixed;bottom:80px;left:50%;transform:translateX(-50%);z-index:999999;pointer-events:none;';" +
-                "document.body.appendChild(container);" +
-                // Toast function
+                // Provide native toast bridge for the web app to call if needed
                 "window.showRyvenToast = function(message, type) {" +
-                "  type = type || 'success';" +
-                "  var toast = document.createElement('div');" +
-                "  var colors = {success:'#2E7D32',error:'#D32F2F',info:'#1976D2',warning:'#F57C00'};" +
-                "  var icons = {success:'\u2713',error:'\u2717',info:'\u2139',warning:'\u26A0'};" +
-                "  toast.style.cssText = 'background:' + (colors[type]||colors.success) + ';color:white;padding:12px 24px;border-radius:8px;margin-top:8px;font-size:14px;font-family:sans-serif;box-shadow:0 4px 12px rgba(0,0,0,0.3);display:flex;align-items:center;gap:8px;opacity:0;transition:opacity 0.3s;pointer-events:auto;min-width:200px;max-width:80vw;';" +
-                "  toast.innerHTML = '<span style=\"font-size:18px\">' + (icons[type]||icons.success) + '</span><span>' + message + '</span>';" +
-                "  container.appendChild(toast);" +
-                "  requestAnimationFrame(function(){toast.style.opacity='1';});" +
-                "  setTimeout(function(){toast.style.opacity='0';setTimeout(function(){toast.remove();},300);},3000);" +
+                "  if (window.RyvenNative) { window.RyvenNative.showToast(message); }" +
                 "};" +
-                // Intercept fetch/XHR to detect successful actions and show feedback
-                "var origFetch = window.fetch;" +
-                "window.fetch = function() {" +
-                "  var url = arguments[0];" +
-                "  var opts = arguments[1] || {};" +
-                "  return origFetch.apply(this, arguments).then(function(response) {" +
-                "    if (response.ok && opts.method && opts.method.toUpperCase() !== 'GET') {" +
-                "      var urlStr = typeof url === 'string' ? url : url.url;" +
-                "      if (urlStr && !urlStr.includes('log-user-in-app') && !urlStr.includes('/analytics')) {" +
-                "        window.showRyvenToast('Operazione completata!', 'success');" +
-                "      }" +
-                "    } else if (!response.ok && opts.method && opts.method.toUpperCase() !== 'GET') {" +
-                "      window.showRyvenToast('Errore. Riprova.', 'error');" +
-                "    }" +
-                "    return response;" +
-                "  }).catch(function(err) {" +
-                "    if (opts.method && opts.method.toUpperCase() !== 'GET') {" +
-                "      window.showRyvenToast('Errore di rete.', 'error');" +
-                "    }" +
-                "    throw err;" +
-                "  });" +
-                "};" +
-                // Loading indicator for image uploads
-                "var origXHR = XMLHttpRequest.prototype.open;" +
-                "XMLHttpRequest.prototype.open = function(method) {" +
-                "  if (method.toUpperCase() === 'POST' || method.toUpperCase() === 'PUT') {" +
-                "    this.addEventListener('loadstart', function() {" +
-                "      window.showRyvenToast('Caricamento in corso...', 'info');" +
-                "    });" +
-                "    this.addEventListener('load', function() {" +
-                "      if (this.status >= 200 && this.status < 300) {" +
-                "        window.showRyvenToast('Caricamento completato!', 'success');" +
-                "      }" +
-                "    });" +
-                "    this.addEventListener('error', function() {" +
-                "      window.showRyvenToast('Errore nel caricamento.', 'error');" +
-                "    });" +
+                // Hide the Base44 'Install app' banner since we're already in the app
+                "var style = document.createElement('style');" +
+                "style.textContent = '" +
+                "  [class*=install], [class*=Install], [data-testid*=install] {" +
+                "    display: none !important;" +
                 "  }" +
-                "  return origXHR.apply(this, arguments);" +
-                "};" +
+                "';" +
+                "document.head.appendChild(style);" +
+                // Try to hide install prompt after DOM loads
+                "setTimeout(function() {" +
+                "  document.querySelectorAll('button, div, a').forEach(function(el) {" +
+                "    if (el.textContent && el.textContent.includes('Installa') && el.closest && el.closest('[class]')) {" +
+                "      var banner = el.closest('[class]');" +
+                "      if (banner && banner.textContent.includes('Installa Ryven')) {" +
+                "        banner.style.display = 'none';" +
+                "      }" +
+                "    }" +
+                "  });" +
+                "}, 2000);" +
                 "})();";
         webView.evaluateJavascript(js, null);
     }
