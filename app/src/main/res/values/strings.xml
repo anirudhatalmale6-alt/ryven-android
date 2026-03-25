@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Ryven</string>
+    <string name="no_internet">Nessuna connessione internet. Controlla la tua rete e riprova.</string>
+    <string name="loading">Caricamento…</string>
+    <string name="retry">Riprova</string>
+</resources>
