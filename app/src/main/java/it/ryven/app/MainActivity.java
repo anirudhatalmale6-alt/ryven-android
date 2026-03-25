@@ -170,6 +170,7 @@ public class MainActivity extends AppCompatActivity {
                 if (!isPageLoaded) {
                     progressBar.setVisibility(View.VISIBLE);
                 }
+                injectNotificationPolyfill(view);
             }
 
             @Override
@@ -293,13 +294,31 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
+    private void injectNotificationPolyfill(WebView view) {
+        // Polyfill the Notification API before page scripts run.
+        // WebView lacks Notification support, which crashes OneSignal SDK.
+        // This stub prevents the crash by providing a no-op Notification constructor.
+        String js = "(function() {" +
+                "if (window.Notification) return;" +
+                "window.Notification = function(title, options) {};" +
+                "window.Notification.permission = 'denied';" +
+                "window.Notification.requestPermission = function(cb) {" +
+                "  var p = Promise.resolve('denied');" +
+                "  if (cb) cb('denied');" +
+                "  return p;" +
+                "};" +
+                "window.Notification.maxActions = 0;" +
+                "})();";
+        view.evaluateJavascript(js, null);
+    }
+
     private void injectErrorLogger() {
         // Inject a small floating error log panel for debugging
         // Client can screenshot this to show us exact JS errors
         String js = "(function() {" +
                 "if (window.__ryvenDebug) return;" +
                 "window.__ryvenDebug = true;" +
-                // Create debug panel (hidden by default, shake to show)
+                // Create debug panel (hidden by default, triple-tap to show)
                 "var panel = document.createElement('div');" +
                 "panel.id = 'ryven-debug';" +
                 "panel.style.cssText = 'position:fixed;top:0;left:0;right:0;max-height:40vh;overflow:auto;background:rgba(0,0,0,0.85);color:#0f0;font:11px monospace;padding:8px;z-index:999999;display:none;';" +
@@ -307,9 +326,46 @@ public class MainActivity extends AppCompatActivity {
                 "var logs = [];" +
                 "function addLog(type, msg) {" +
                 "  logs.push('[' + type + '] ' + msg);" +
-                "  if (logs.length > 50) logs.shift();" +
+                "  if (logs.length > 80) logs.shift();" +
                 "  panel.innerHTML = '<b>Debug Log (tap to close)</b><br>' + logs.join('<br>');" +
                 "}" +
+                // Intercept fetch to log API errors with full URL
+                "var origFetch = window.fetch;" +
+                "window.fetch = function(url, opts) {" +
+                "  var method = (opts && opts.method) || 'GET';" +
+                "  var reqUrl = typeof url === 'string' ? url : (url.url || '');" +
+                "  return origFetch.apply(this, arguments).then(function(resp) {" +
+                "    if (resp.status >= 400) {" +
+                "      resp.clone().text().then(function(body) {" +
+                "        addLog('FETCH ' + resp.status, method + ' ' + reqUrl.substring(0, 150) + ' -> ' + body.substring(0, 200));" +
+                "      }).catch(function() {});" +
+                "    }" +
+                "    return resp;" +
+                "  }).catch(function(err) {" +
+                "    addLog('FETCH ERR', method + ' ' + reqUrl.substring(0, 150) + ' -> ' + err.message);" +
+                "    throw err;" +
+                "  });" +
+                "};" +
+                // Intercept XMLHttpRequest to log API errors with full URL
+                "var origOpen = XMLHttpRequest.prototype.open;" +
+                "var origSend = XMLHttpRequest.prototype.send;" +
+                "XMLHttpRequest.prototype.open = function(method, url) {" +
+                "  this._ryMethod = method;" +
+                "  this._ryUrl = url;" +
+                "  return origOpen.apply(this, arguments);" +
+                "};" +
+                "XMLHttpRequest.prototype.send = function() {" +
+                "  var self = this;" +
+                "  this.addEventListener('load', function() {" +
+                "    if (self.status >= 400) {" +
+                "      addLog('XHR ' + self.status, self._ryMethod + ' ' + (self._ryUrl||'').substring(0, 150) + ' -> ' + (self.responseText||'').substring(0, 200));" +
+                "    }" +
+                "  });" +
+                "  this.addEventListener('error', function() {" +
+                "    addLog('XHR ERR', self._ryMethod + ' ' + (self._ryUrl||'').substring(0, 150));" +
+                "  });" +
+                "  return origSend.apply(this, arguments);" +
+                "};" +
                 // Capture errors
                 "window.addEventListener('error', function(e) {" +
                 "  addLog('ERR', e.message + ' at ' + (e.filename||'') + ':' + (e.lineno||''));" +
@@ -325,10 +381,11 @@ public class MainActivity extends AppCompatActivity {
                 "};" +
                 // Log user agent for diagnostics
                 "addLog('UA', navigator.userAgent);" +
-                // Log WebView detection
+                // Log WebView detection + Notification polyfill status
                 "addLog('INFO', 'wv=' + (navigator.userAgent.includes('wv')) + " +
                 "  ' sw=' + ('serviceWorker' in navigator) + " +
                 "  ' notif=' + ('Notification' in window) + " +
+                "  ' notifPerm=' + (window.Notification ? Notification.permission : 'N/A') + " +
                 "  ' idb=' + (typeof indexedDB !== 'undefined'));" +
                 // Triple-tap top-left corner to toggle panel
                 "var tapCount = 0, tapTimer;" +
