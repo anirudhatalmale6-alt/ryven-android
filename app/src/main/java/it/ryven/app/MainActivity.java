@@ -145,9 +145,16 @@ public class MainActivity extends AppCompatActivity {
         settings.setJavaScriptCanOpenWindowsAutomatically(true);
         settings.setSupportMultipleWindows(false);
 
-        // User agent - keep default Chrome UA, just append app marker
+        // User agent - CRITICAL: remove WebView markers so the web app
+        // thinks it's running in Chrome, not a WebView.
+        // Default WebView UA contains "; wv)" and "Version/4.0" which
+        // Base44/web apps detect and may restrict functionality.
         String ua = settings.getUserAgentString();
-        settings.setUserAgentString(ua + " RyvenApp/1.0");
+        // Remove "; wv)" marker
+        ua = ua.replace("; wv)", ")");
+        // Remove "Version/4.0 " which is WebView-specific
+        ua = ua.replace("Version/4.0 ", "");
+        settings.setUserAgentString(ua);
 
         // Cookies
         CookieManager cookieManager = CookieManager.getInstance();
