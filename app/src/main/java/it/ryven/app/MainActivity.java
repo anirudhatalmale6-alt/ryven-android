@@ -259,6 +259,7 @@ public class MainActivity extends AppCompatActivity {
                 progressBar.setVisibility(View.GONE);
                 hideError();
                 injectErrorLogger();
+                injectAuthCheck(view);
             }
 
             @Override
@@ -403,6 +404,32 @@ public class MainActivity extends AppCompatActivity {
                 "  Notification.permission = 'denied';" +
                 "  Notification.requestPermission = function(c){var p=Promise.resolve('denied');if(c)c('denied');return p;};" +
                 "}" +
+                "})();";
+        view.evaluateJavascript(js, null);
+    }
+
+    private void injectAuthCheck(WebView view) {
+        // Check if user is authenticated by testing the User/me API endpoint.
+        // If not authenticated (401), redirect to login page after splash screen clears.
+        // Only runs once per page load, waits 5s for splash to clear.
+        String js = "(function() {" +
+                "if (window.__ryvenAuthChecked) return;" +
+                "window.__ryvenAuthChecked = true;" +
+                "setTimeout(function() {" +
+                "  if (window.location.pathname === '/login' || window.location.pathname === '/signup') return;" +
+                "  var xhr = new XMLHttpRequest();" +
+                "  xhr.open('GET', '/api/apps/69b963f9b0a8abfc410dd7cc/entities/User/me', true);" +
+                "  xhr.onload = function() {" +
+                "    if (xhr.status === 401) {" +
+                "      console.log('[Ryven] Not authenticated, redirecting to login');" +
+                "      window.location.href = '/login';" +
+                "    } else {" +
+                "      console.log('[Ryven] Authenticated OK');" +
+                "    }" +
+                "  };" +
+                "  xhr.onerror = function() { console.log('[Ryven] Auth check failed (network)'); };" +
+                "  xhr.send();" +
+                "}, 5000);" +
                 "})();";
         view.evaluateJavascript(js, null);
     }
