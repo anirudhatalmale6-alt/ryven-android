@@ -180,8 +180,13 @@ public class MainActivity extends AppCompatActivity {
                 if (!isPageLoaded) {
                     progressBar.setVisibility(View.VISIBLE);
                 }
-                // Also inject polyfill here as a safety net (in case shouldInterceptRequest didn't run)
+                // Inject OneSignal polyfill
                 injectNotificationPolyfill(view);
+                // If this is an OAuth callback with access_token, store it immediately
+                // before the React app loads (prevents race condition with 401 auto-logout)
+                if (url != null && url.contains("access_token=")) {
+                    injectTokenFromUrl(view, url);
+                }
             }
 
             @Override
@@ -343,6 +348,27 @@ public class MainActivity extends AppCompatActivity {
                 "}" +
                 "})();";
         view.evaluateJavascript(js, null);
+    }
+
+    private void injectTokenFromUrl(WebView view, String url) {
+        // Extract access_token from OAuth callback URL and store in localStorage
+        // BEFORE the React app loads. This prevents race conditions where other
+        // API calls trigger 401 auto-logout before the token is fully processed.
+        try {
+            Uri uri = Uri.parse(url);
+            String token = uri.getQueryParameter("access_token");
+            if (token != null && !token.isEmpty()) {
+                Log.d("RyvenWebView", "OAuth token found in URL, injecting into localStorage");
+                String js = "(function() {" +
+                        "localStorage.setItem('token', '" + token.replace("'", "\\'") + "');" +
+                        "localStorage.setItem('base44_access_token', '" + token.replace("'", "\\'") + "');" +
+                        "console.log('[Ryven] Auth token pre-stored in localStorage');" +
+                        "})();";
+                view.evaluateJavascript(js, null);
+            }
+        } catch (Exception e) {
+            Log.e("RyvenWebView", "Token injection failed: " + e.getMessage());
+        }
     }
 
     private void injectErrorLogger() {
