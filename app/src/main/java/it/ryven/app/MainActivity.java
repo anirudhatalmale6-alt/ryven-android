@@ -67,7 +67,6 @@ public class MainActivity extends AppCompatActivity {
     private ValueCallback<Uri[]> fileUploadCallback;
     private String cameraPhotoPath;
     private boolean isPageLoaded = false;
-    private String pendingAuthToken = null; // Token extracted from OAuth redirect
     private final java.util.ArrayList<String> navLog = new java.util.ArrayList<>();
 
     private final ActivityResultLauncher<Intent> fileChooserLauncher =
@@ -191,19 +190,10 @@ public class MainActivity extends AppCompatActivity {
                 // Inject OneSignal polyfill
                 injectNotificationPolyfill(view);
 
-                // If this is an OAuth callback with access_token, save token for later injection
+                // Log if this is an OAuth callback with access_token
                 if (url != null && url.contains("access_token=")) {
-                    try {
-                        Uri uri = Uri.parse(url);
-                        String token = uri.getQueryParameter("access_token");
-                        if (token != null && !token.isEmpty()) {
-                            pendingAuthToken = token;
-                            Log.d("RyvenWebView", "OAuth token captured from URL (length=" + token.length() + ")");
-                            navLog.add("TOKEN_FOUND:len=" + token.length());
-                        }
-                    } catch (Exception e) {
-                        Log.e("RyvenWebView", "Token extraction failed: " + e.getMessage());
-                    }
+                    Log.d("RyvenWebView", "OAuth redirect detected with access_token in URL");
+                    navLog.add("TOKEN_IN_URL");
                 }
             }
 
@@ -234,21 +224,6 @@ public class MainActivity extends AppCompatActivity {
                 navLog.add("FINISH:" + shortUrl);
                 if (navLog.size() > 20) navLog.remove(0);
 
-                // If we captured an auth token from the OAuth redirect, inject it now
-                // (onPageFinished is the right time - the new page's localStorage is available)
-                if (pendingAuthToken != null && url != null && url.contains("app.ryven.it")) {
-                    String token = pendingAuthToken;
-                    pendingAuthToken = null;
-                    Log.d("RyvenWebView", "Injecting saved auth token into localStorage");
-                    String js = "(function() {" +
-                            "localStorage.setItem('token', '" + token.replace("'", "\\'").replace("\\", "\\\\") + "');" +
-                            "localStorage.setItem('base44_access_token', '" + token.replace("'", "\\'").replace("\\", "\\\\") + "');" +
-                            "console.log('[Ryven] Auth token injected into localStorage, reloading...');" +
-                            "window.location.reload();" +
-                            "})();";
-                    view.evaluateJavascript(js, null);
-                }
-
                 injectErrorLogger();
             }
 
@@ -268,21 +243,6 @@ public class MainActivity extends AppCompatActivity {
                 Log.d("RyvenWebView", "Navigation: " + shortUrl);
                 navLog.add("NAV:" + shortUrl);
                 if (navLog.size() > 20) navLog.remove(0);
-
-                // Capture token from redirect URL before it loads
-                if (url.contains("access_token=")) {
-                    try {
-                        Uri uri = Uri.parse(url);
-                        String token = uri.getQueryParameter("access_token");
-                        if (token != null && !token.isEmpty()) {
-                            pendingAuthToken = token;
-                            Log.d("RyvenWebView", "Token captured in shouldOverrideUrlLoading");
-                            navLog.add("TOKEN_CAPTURED:len=" + token.length());
-                        }
-                    } catch (Exception e) {
-                        Log.e("RyvenWebView", "Token capture failed: " + e.getMessage());
-                    }
-                }
 
                 if (url.startsWith("http://") || url.startsWith("https://")) {
                     // WhatsApp - open externally
@@ -499,6 +459,14 @@ public class MainActivity extends AppCompatActivity {
                 "addLog('URL', window.location.href);" +
                 // Inject navigation log from Java side
                 "addLog('NAV_HISTORY', '" + String.join(" | ", navLog).replace("'", "\\'") + "');" +
+                // Check auth status after React SDK has had time to process
+                "setTimeout(function() {" +
+                "  var t = localStorage.getItem('token');" +
+                "  var b = localStorage.getItem('base44_access_token');" +
+                "  addLog('AUTH_CHECK', 'token=' + (t ? 'YES('+t.length+')' : 'NO') + " +
+                "    ' base44=' + (b ? 'YES('+b.length+')' : 'NO') + " +
+                "    ' url=' + window.location.href.substring(0, 100));" +
+                "}, 3000);" +
                 // Triple-tap top-left corner to toggle panel
                 "var tapCount = 0, tapTimer;" +
                 "document.addEventListener('click', function(e) {" +
